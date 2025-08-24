@@ -1,118 +1,81 @@
-use borsh::{BorshDeserialize, BorshSerialize};
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
- clock::Clock, entrypoint::ProgramResult, instruction::{AccountMeta, Instruction}, program::invoke_signed, program_error::ProgramError, pubkey::Pubkey, rent::Rent, sysvar::{Sysvar, SysvarSerialize}
-    };
-
-
+    clock::Clock,
+    entrypoint::ProgramResult,
+    program::invoke_signed,
+    program_error::ProgramError,
+    pubkey::Pubkey,
+    rent::Rent,
+    sysvar::Sysvar,
+};
+use borsh::{BorshDeserialize , BorshSerialize};
 use solana_system_interface::instruction::create_account;
 
 
-
-
-pub fn initialize_pool( 
+pub fn initialize_pool(
     program_id: &Pubkey,
-    accounts: &[AccountInfo] , 
-    reward_rate :u64
-)->ProgramResult{
+    accounts: &[AccountInfo],
+    reward_rate: u64,
+) -> ProgramResult {
+    let account_iter = &mut accounts.iter();
+    let pool_account = next_account_info(account_iter)?;
+    let authority_info = next_account_info(account_iter)?;
+    let system_program = next_account_info(account_iter)?;
 
-let account_iter = &mut accounts.iter();
-let pool_account = next_account_info(account_iter)?;
-let authority_info = next_account_info(account_iter)?;
-let system_program = next_account_info(account_iter)?;
-let rent_sysvar = next_account_info(account_iter)?;
-
-
-
-  if !authority_info.is_signer {
+    if !authority_info.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
-   
-    if pool_account.owner != program_id {
-        return Err(ProgramError::IllegalOwner);
+
+
+    if !pool_account.data_is_empty() {
+         return Err(ProgramError::AccountAlreadyInitialized);
     }
 
-if PoolAccount::try_from_slice(&pool_account.data.borrow()).is_ok() {
-    return Err(ProgramError::AccountAlreadyInitialized);
-}
-
-
-
-let clock = Clock::get()?;
-let time = clock.unix_timestamp;
-
- let (expected_pda, bump) = Pubkey::find_program_address(&[b"pool"], program_id);
+    // --- PDA Check ---
+    let (expected_pda, bump) = Pubkey::find_program_address(&[b"pool"], program_id);
     if pool_account.key != &expected_pda {
-        return Err(ProgramError::InvalidAccountData);
+        return Err(ProgramError::InvalidSeeds);
     }
- 
 
+    // --- Create Account via CPI ---
+    let space = std::mem::size_of::<PoolAccount>();
+    // Use Rent::get() which is simpler than passing the sysvar account
+    let min_lamports = Rent::get()?.minimum_balance(space);
 
- let rent = &Rent::from_account_info(rent_sysvar)?;   
- let space = std::mem::size_of::<PoolAccount>();
- let minlamports = rent.minimum_balance(space);
+    invoke_signed(
+        &create_account(
+            authority_info.key,
+            pool_account.key,
+            min_lamports,
+            space as u64,
+            program_id,
+        ),
+        &[
+            authority_info.clone(),
+            pool_account.clone(),
+            system_program.clone(),
+        ],
+        &[&[b"pool", &[bump]]],
+    )?;
 
-let ix: Instruction = create_account(
-    authority_info.key,         
-    pool_account.key,            
-    minlamports,              
-    space as u64,                
-    program_id,               
-);
+    // --- Initialize State ---
+    let clock = Clock::get()?;
+    let mut pool_data = PoolAccount::try_from_slice(&pool_account.data.borrow())?;
+    
+    // This check is redundant if we checked for empty data earlier, but good for safety.
+    if pool_data.bump != 0 {
+        return Err(ProgramError::AccountAlreadyInitialized);
+    }
 
+    pool_data.authority = *authority_info.key; // CORRECT: Set signer as authority
+    pool_data.last_update_time = clock.unix_timestamp;
+    pool_data.reward_rate = reward_rate;
+    pool_data.total_staked = 0;
+    pool_data.bump = bump;
 
-invoke_signed(
-    &ix,
-    &[
-        authority_info.clone(),     
-        pool_account.clone(),    
-        system_program.clone(),    
-    ],
-    &[&[b"pool", &[bump]]],
-)?;
+    pool_data.serialize(&mut *pool_account.data.borrow_mut())?;
 
-
-let pool_account_onchain = PoolAccount {
-    authority :*program_id,
-    last_update_time :time,
-    reward_rate :reward_rate,
-    total_staked :0,
-    bump :bump
-};
-
-
-
-pool_account_onchain.serialize(&mut *pool_account.data.borrow_mut())?;
-
-Ok(())
-}
-
-pub fn stake(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo] ,
-    amount :u32
-)->ProgramResult{
-
-
-Ok(())
-}
-
-
-pub fn unstake(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo] ,
-    amount :u32
-)->ProgramResult{
-
-
-Ok(())
-}
-
-pub fn claim_rewards(program_id :&Pubkey , accounts  : &[AccountInfo])->ProgramResult{
-
-
-
-Ok(())
+    Ok(())
 }
 
 
