@@ -1,15 +1,10 @@
 use solana_program::{
-    account_info::{next_account_info, AccountInfo},
-    clock::Clock,
-    entrypoint::ProgramResult,
-    program::invoke_signed,
-    program_error::ProgramError,
-    pubkey::Pubkey,
-    rent::Rent,
-    sysvar::Sysvar,
+    account_info::{next_account_info, AccountInfo}, clock::Clock, entrypoint::ProgramResult, example_mocks::solana_sdk::system_program, program::{invoke, invoke_signed}, program_error::ProgramError, pubkey::Pubkey, rent::Rent, sysvar::Sysvar
 };
 use borsh::{BorshDeserialize , BorshSerialize};
-use solana_system_interface::instruction::create_account;
+use solana_system_interface::instruction::{create_account , transfer};
+
+use crate::{accounts::{PoolAccount, StakeAccount}, constants::Seeds};
 
 
 pub fn initialize_pool(
@@ -31,15 +26,15 @@ pub fn initialize_pool(
          return Err(ProgramError::AccountAlreadyInitialized);
     }
 
-    // --- PDA Check ---
-    let (expected_pda, bump) = Pubkey::find_program_address(&[b"pool"], program_id);
+  
+    let (expected_pda, bump) = Pubkey::find_program_address(&[Seeds::PoolSeed ,authority_info.key.as_ref() ], program_id);
     if pool_account.key != &expected_pda {
         return Err(ProgramError::InvalidSeeds);
     }
 
-    // --- Create Account via CPI ---
+
     let space = std::mem::size_of::<PoolAccount>();
-    // Use Rent::get() which is simpler than passing the sysvar account
+
     let min_lamports = Rent::get()?.minimum_balance(space);
 
     invoke_signed(
@@ -58,7 +53,7 @@ pub fn initialize_pool(
         &[&[b"pool", &[bump]]],
     )?;
 
-    // --- Initialize State ---
+  
     let clock = Clock::get()?;
     let mut pool_data = PoolAccount::try_from_slice(&pool_account.data.borrow())?;
     
@@ -67,32 +62,128 @@ pub fn initialize_pool(
         return Err(ProgramError::AccountAlreadyInitialized);
     }
 
-    pool_data.authority = *authority_info.key; // CORRECT: Set signer as authority
+    pool_data.authority = *authority_info.key; 
     pool_data.last_update_time = clock.unix_timestamp;
     pool_data.reward_rate = reward_rate;
     pool_data.total_staked = 0;
     pool_data.bump = bump;
+    pool_data.is_active = true;
 
     pool_data.serialize(&mut *pool_account.data.borrow_mut())?;
 
     Ok(())
 }
 
+pub fn stake(program_id: &Pubkey ,accounts : &[AccountInfo] , amount : u64 )->ProgramResult {
+    let account_iter = &mut accounts.iter();
 
-#[derive(BorshSerialize, BorshDeserialize, Debug)]
-pub struct PoolAccount {
-    pub authority: Pubkey,          
-    pub reward_rate: u64,           
-    pub total_staked: u64,          
-    pub last_update_time: i64,      
-    pub bump: u8,                   
+    let staker = next_account_info(account_iter)?;
+    let stake_account  = next_account_info(account_iter)?;
+    let pool_account  = next_account_info(account_iter)?;
+    let system = next_account_info(account_iter)?;
+
+
+   
+    let mut pool_data = PoolAccount::try_from_slice(&pool_account.data.borrow())?;
+
+    if !pool_data.is_active{
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    if pool_account.owner != program_id {
+        return Err(ProgramError::IllegalOwner)
+    } 
+
+    if stake_account.owner != program_id {
+        return Err(ProgramError::IllegalOwner)
+    } 
+  
+    if !staker.is_signer {
+        return Err(ProgramError::InvalidAccountOwner);
+    } 
+
+     let (expected_pda, bump) = Pubkey::find_program_address(&[Seeds::StakeSeed , staker.key.as_ref()], program_id);
+    if stake_account.key != &expected_pda {
+        return Err(ProgramError::InvalidSeeds);
+    }
+
+    if !stake_account.data_is_empty() {
+
+         let mut stake_data = StakeAccount::try_from_slice(&stake_account.data.borrow())?;
+        
+        if stake_data.owner != *staker.key {
+            return Err(ProgramError::IllegalOwner)
+        }
+
+        stake_data.amount = stake_data.amount
+        .checked_add(amount)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+
+            invoke(
+        &transfer(staker.key, stake_account.key, amount),
+        &[
+            staker.clone(),
+            stake_account.clone(),
+            system.clone(),
+        ],
+    )?;
+
+    pool_data.serialize(&mut *pool_account.data.borrow_mut())?;
+    stake_data.serialize(&mut *stake_account.data.borrow_mut())?;
+
+        return  Ok(());
+    }
+
+        let space = std::mem::size_of::<StakeAccount>();
+        let min_lamports = Rent::get()?.minimum_balance(space);
+
+        let signer_seeds: &[&[u8]] = &[Seeds::StakeSeed, staker.key.as_ref(), &[bump]];
+
+    
+
+        invoke_signed(
+            &create_account(
+                staker.key,
+                stake_account.key,
+                min_lamports,
+                space as u64,
+                program_id,
+            ),
+            &[
+                staker.clone(),
+                stake_account.clone(),
+                system.clone(),
+            ],
+            &[signer_seeds],
+        )?;
+
+        invoke(
+        &transfer(staker.key, stake_account.key, amount),
+        &[
+            staker.clone(),
+            stake_account.clone(),
+            system.clone(),
+        ],
+    )?;
+    
+
+
+    let clock = Clock::get()?;
+
+       pool_data.total_staked = pool_data.total_staked
+        .checked_add(amount)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+
+    let stake_data = StakeAccount {
+        owner: *staker.key,
+        amount,
+        bump,
+        last_stake_time: clock.unix_timestamp,
+    };
+
+    pool_data.serialize(&mut *pool_account.data.borrow_mut())?;
+    stake_data.serialize(&mut *stake_account.data.borrow_mut())?;
+
+    Ok(())
 }
 
-#[derive(BorshSerialize, BorshDeserialize, Debug)]
-pub struct StakeAccount {
-    pub owner: Pubkey,   
-    pub amount: u64,               
-    pub reward_debt: u64,         
-    pub last_stake_time: i64,       
-    pub bump: u8,                   
-}
