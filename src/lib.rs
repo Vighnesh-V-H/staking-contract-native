@@ -42,8 +42,6 @@ pub fn process_instruction(
         StakingInstruction::Unstake { amount } => {
             unstake(program_id, accounts, amount)
         }
-        StakingInstruction::ClaimRewards => {
-            claim_rewards(program_id, accounts)
-        }
+    
     }
 }
